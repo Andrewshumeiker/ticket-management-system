@@ -1,5 +1,13 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEnum, IsOptional, IsInt, Min, Max } from 'class-validator';
+import {
+  IsEnum,
+  IsOptional,
+  IsInt,
+  IsString,
+  MaxLength,
+  Min,
+  Max,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 import { TicketStatus, TicketPriority } from '../../common/enums/ticket.enum';
 
@@ -16,6 +24,8 @@ export class FilterTicketsDto {
 
   @ApiProperty({ example: 'infrastructure', required: false })
   @IsOptional()
+  @IsString()
+  @MaxLength(50)
   categorySlug?: string;
 
   @ApiProperty({ example: 1, required: false, default: 1 })

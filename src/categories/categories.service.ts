@@ -6,11 +6,11 @@ import { Category } from './entities/category.entity';
 // Categorías iniciales que se insertan si la tabla está vacía (seed automático)
 const DEFAULT_CATEGORIES = [
   { name: 'Infraestructura', slug: 'infrastructure', slaHours: 4 },
-  { name: 'Software',        slug: 'software',        slaHours: 8 },
-  { name: 'Redes',           slug: 'networking',      slaHours: 6 },
-  { name: 'Seguridad',       slug: 'security',        slaHours: 2 },
-  { name: 'Hardware',        slug: 'hardware',        slaHours: 24 },
-  { name: 'General',         slug: 'general',         slaHours: 48 },
+  { name: 'Software', slug: 'software', slaHours: 8 },
+  { name: 'Redes', slug: 'networking', slaHours: 6 },
+  { name: 'Seguridad', slug: 'security', slaHours: 2 },
+  { name: 'Hardware', slug: 'hardware', slaHours: 24 },
+  { name: 'General', slug: 'general', slaHours: 48 },
 ];
 
 @Injectable()
@@ -37,13 +37,15 @@ export class CategoriesService implements OnModuleInit {
 
   async findBySlug(slug: string): Promise<Category> {
     const cat = await this.categoryRepo.findOne({ where: { slug } });
-    if (!cat) throw new NotFoundException(`Categoría con slug "${slug}" no encontrada`);
+    if (!cat)
+      throw new NotFoundException(`Categoría con slug "${slug}" no encontrada`);
     return cat;
   }
 
   async findById(id: number): Promise<Category> {
     const cat = await this.categoryRepo.findOne({ where: { id } });
-    if (!cat) throw new NotFoundException(`Categoría con id ${id} no encontrada`);
+    if (!cat)
+      throw new NotFoundException(`Categoría con id ${id} no encontrada`);
     return cat;
   }
 }

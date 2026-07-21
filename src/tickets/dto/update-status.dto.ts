@@ -1,5 +1,11 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEnum, IsOptional, IsString, IsUUID } from 'class-validator';
+import {
+  IsEnum,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+} from 'class-validator';
 import { TicketStatus } from '../../common/enums/ticket.enum';
 
 export class UpdateStatusDto {
@@ -24,5 +30,6 @@ export class UpdateStatusDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(2000)
   note?: string;
 }

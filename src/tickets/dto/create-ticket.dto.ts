@@ -19,11 +19,13 @@ export class CreateTicketDto {
   title: string;
 
   @ApiProperty({
-    example: 'Desde las 9am el servidor muestra timeout en todos los endpoints.',
+    example:
+      'Desde las 9am el servidor muestra timeout en todos los endpoints.',
     description: 'Descripción detallada del problema',
   })
   @IsString()
   @MinLength(10)
+  @MaxLength(5000)
   description: string;
 
   @ApiProperty({
@@ -31,12 +33,14 @@ export class CreateTicketDto {
     description: 'Slug de la categoría (ver GET /categories)',
   })
   @IsString()
+  @MaxLength(50)
   categorySlug: string;
 
   @ApiProperty({
     example: 'https://res.cloudinary.com/myapp/image/upload/evidence.jpg',
     required: false,
-    description: 'URL pública de la imagen subida a Cloudinary por Power Automate',
+    description:
+      'URL pública de la imagen subida a Cloudinary por Power Automate',
   })
   @IsOptional()
   @IsUrl()
@@ -53,7 +57,8 @@ export class CreateTicketDto {
   @ApiProperty({
     example: 'uuid-generado-por-power-apps',
     required: false,
-    description: 'Clave de idempotencia generada por Power Apps para evitar duplicados en retries',
+    description:
+      'Clave de idempotencia generada por Power Apps para evitar duplicados en retries',
   })
   @IsOptional()
   @IsString()

@@ -11,7 +11,6 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import {
-  ApiBody,
   ApiOperation,
   ApiParam,
   ApiQuery,
@@ -20,9 +19,9 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 
-import { TicketsService }   from './tickets.service';
-import { CreateTicketDto }  from './dto/create-ticket.dto';
-import { UpdateStatusDto }  from './dto/update-status.dto';
+import { TicketsService } from './tickets.service';
+import { CreateTicketDto } from './dto/create-ticket.dto';
+import { UpdateStatusDto } from './dto/update-status.dto';
 import { FilterTicketsDto } from './dto/filter-tickets.dto';
 
 @ApiTags('Tickets')
@@ -40,8 +39,14 @@ export class TicketsController {
       'Llamado por Power Automate. Soporta idempotencyKey para evitar duplicados en retries.',
   })
   @ApiResponse({ status: 201, description: 'Ticket creado exitosamente' })
-  @ApiResponse({ status: 400, description: 'Validación fallida o usuario/categoría no encontrada' })
-  @ApiResponse({ status: 500, description: 'Error de transacción (rollback ejecutado)' })
+  @ApiResponse({
+    status: 400,
+    description: 'Validación fallida o usuario/categoría no encontrada',
+  })
+  @ApiResponse({
+    status: 500,
+    description: 'Error de transacción (rollback ejecutado)',
+  })
   create(@Body() dto: CreateTicketDto) {
     return this.ticketsService.create(dto);
   }
@@ -69,11 +74,14 @@ export class TicketsController {
   @Get('history/recent')
   @ApiOperation({
     summary: 'Historial reciente para polling de n8n',
-    description: 'Retorna cambios de estado de los últimos N minutos. Usado por n8n para disparar notificaciones.',
+    description:
+      'Retorna cambios de estado de los últimos N minutos. Usado por n8n para disparar notificaciones.',
   })
   @ApiQuery({ name: 'minutes', required: false, example: 2 })
   getRecentHistory(@Query('minutes') minutes?: string) {
-    return this.ticketsService.getRecentHistory(minutes ? parseInt(minutes) : 2);
+    return this.ticketsService.getRecentHistory(
+      minutes ? parseInt(minutes) : 2,
+    );
   }
 
   // ── GET /api/v1/tickets/:id ───────────────────────────────────────────────
@@ -94,8 +102,14 @@ export class TicketsController {
       'Actualiza el estado y registra la transición en ticket_history. Al llegar a RESOLVED, registra el timestamp y calcula si cumplió el SLA.',
   })
   @ApiParam({ name: 'id', description: 'UUID del ticket' })
-  @ApiResponse({ status: 200, description: 'Estado actualizado con métricas de resolución' })
-  @ApiResponse({ status: 400, description: 'Estado inválido o técnico no encontrado' })
+  @ApiResponse({
+    status: 200,
+    description: 'Estado actualizado con métricas de resolución',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Estado inválido o técnico no encontrado',
+  })
   updateStatus(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateStatusDto,

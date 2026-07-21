@@ -4,7 +4,6 @@ import {
   Column,
   CreateDateColumn,
   UpdateDateColumn,
-  OneToMany,
 } from 'typeorm';
 
 @Entity('users')
@@ -18,11 +17,11 @@ export class User {
   @Column({ length: 150, unique: true })
   email: string;
 
-  @Column({ length: 20, nullable: true })
-  phone: string;   // Para notificaciones WhatsApp via n8n
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  phone: string | null; // Para notificaciones WhatsApp via n8n
 
-  @Column({ length: 100, nullable: true })
-  department: string;
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  department: string | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

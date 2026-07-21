@@ -1,10 +1,13 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const configService = app.get(ConfigService);
 
   // ── Prefijo global de API
   app.setGlobalPrefix('api/v1');
@@ -12,15 +15,21 @@ async function bootstrap() {
   // ── Validación global de DTOs con class-validator
   app.useGlobalPipes(
     new ValidationPipe({
-      whitelist: true,       // elimina campos no declarados en el DTO
+      whitelist: true, // elimina campos no declarados en el DTO
       forbidNonWhitelisted: true,
-      transform: true,       // convierte payloads al tipo del DTO
+      transform: true, // convierte payloads al tipo del DTO
     }),
   );
 
   // ── CORS para Power Apps / Power Automate
+  const allowedOrigins = configService
+    .get<string>('CORS_ORIGINS', '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
   app.enableCors({
-    origin: '*',
+    origin: allowedOrigins,
     methods: ['GET', 'POST', 'PATCH', 'DELETE'],
     allowedHeaders: ['Content-Type', 'x-api-key'],
   });
@@ -35,9 +44,10 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('docs', app, document);
 
-  const port = process.env.APP_PORT ?? 3000;
+  const port = configService.get<number>('APP_PORT', 3000);
   await app.listen(port);
-  console.log(`\n🚀  API corriendo en: http://localhost:${port}/api/v1`);
-  console.log(`📄  Swagger UI en:   http://localhost:${port}/docs\n`);
+  const logger = new Logger('Bootstrap');
+  logger.log(`API available at http://localhost:${port}/api/v1`);
+  logger.log(`Swagger available at http://localhost:${port}/docs`);
 }
-bootstrap();
+void bootstrap();

@@ -9,9 +9,9 @@ import {
   JoinColumn,
   Index,
 } from 'typeorm';
-import { User }           from '../../users/entities/user.entity';
-import { Category }       from '../../categories/entities/category.entity';
-import { TicketHistory }  from './ticket-history.entity';
+import { User } from '../../users/entities/user.entity';
+import { Category } from '../../categories/entities/category.entity';
+import { TicketHistory } from './ticket-history.entity';
 import { TicketStatus, TicketPriority } from '../../common/enums/ticket.enum';
 
 @Entity('tickets')
@@ -47,15 +47,26 @@ export class Ticket {
   priority: TicketPriority;
 
   /** URL de la imagen en Cloudinary / S3 */
-  @Column({ name: 'image_url', length: 500, nullable: true })
-  imageUrl: string;
+  @Column({
+    name: 'image_url',
+    type: 'varchar',
+    length: 500,
+    nullable: true,
+  })
+  imageUrl: string | null;
 
   /** Clave de idempotencia enviada por Power Automate para evitar duplicados */
-  @Column({ name: 'idempotency_key', length: 100, unique: true, nullable: true })
-  idempotencyKey: string;
+  @Column({
+    name: 'idempotency_key',
+    type: 'varchar',
+    length: 100,
+    unique: true,
+    nullable: true,
+  })
+  idempotencyKey: string | null;
 
   /** FK → categories */
-  @ManyToOne(() => Category, { eager: true, nullable: true })
+  @ManyToOne(() => Category, { eager: true, nullable: false })
   @JoinColumn({ name: 'category_id' })
   category: Category;
 
@@ -67,7 +78,7 @@ export class Ticket {
   /** FK → users (técnico asignado) */
   @ManyToOne(() => User, { nullable: true })
   @JoinColumn({ name: 'assigned_to' })
-  assignedTo: User;
+  assignedTo: User | null;
 
   /** Historial de cambios de estado */
   @OneToMany(() => TicketHistory, (h) => h.ticket)
@@ -75,7 +86,7 @@ export class Ticket {
 
   /** Timestamp cuando el ticket pasó a RESOLVED */
   @Column({ name: 'resolved_at', type: 'timestamptz', nullable: true })
-  resolvedAt: Date;
+  resolvedAt: Date | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

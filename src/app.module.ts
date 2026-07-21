@@ -1,14 +1,22 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { TicketsModule } from './tickets/tickets.module';
 import { CategoriesModule } from './categories/categories.module';
 import { UsersModule } from './users/users.module';
+import { validateEnvironment } from './config/env.validation';
+import { ApiKeyMiddleware } from './common/middleware/api-key.middleware';
+import { TicketsController } from './tickets/tickets.controller';
+import { UsersController } from './users/users.controller';
+import { CategoriesController } from './categories/categories.controller';
 
 @Module({
   imports: [
     // ── Variables de entorno disponibles en toda la app
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validate: validateEnvironment,
+    }),
 
     // ── Conexión TypeORM → PostgreSQL
     TypeOrmModule.forRootAsync({
@@ -22,8 +30,11 @@ import { UsersModule } from './users/users.module';
         password: config.get('DB_PASS', 'postgres'),
         database: config.get('DB_NAME', 'tickets_db'),
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
-        synchronize: true,   // AUTO-MIGRACIÓN (solo en desarrollo)
-        logging: config.get('NODE_ENV') === 'development',
+        migrations: [__dirname + '/database/migrations/*{.ts,.js}'],
+        synchronize:
+          config.get<string>('NODE_ENV') !== 'production' &&
+          config.get<string>('DB_SYNC', 'false') === 'true',
+        logging: config.get<string>('DB_LOGGING', 'false') === 'true',
       }),
     }),
 
@@ -33,4 +44,10 @@ import { UsersModule } from './users/users.module';
     TicketsModule,
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(ApiKeyMiddleware)
+      .forRoutes(TicketsController, UsersController, CategoriesController);
+  }
+}

@@ -1,153 +1,184 @@
 import {
-  Injectable,
-  NotFoundException,
-  InternalServerErrorException,
   BadRequestException,
+  HttpException,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Like, Repository } from 'typeorm';
-
-import { Ticket }        from './entities/ticket.entity';
-import { TicketHistory } from './entities/ticket-history.entity';
-import { User }          from '../users/entities/user.entity';
-import { Category }      from '../categories/entities/category.entity';
-
-import { CreateTicketDto }  from './dto/create-ticket.dto';
-import { UpdateStatusDto }  from './dto/update-status.dto';
+import { DataSource, EntityManager, Like, Repository } from 'typeorm';
+import { Category } from '../categories/entities/category.entity';
+import { TicketPriority, TicketStatus } from '../common/enums/ticket.enum';
+import { User } from '../users/entities/user.entity';
+import { CreateTicketDto } from './dto/create-ticket.dto';
 import { FilterTicketsDto } from './dto/filter-tickets.dto';
+import { UpdateStatusDto } from './dto/update-status.dto';
+import { TicketHistory } from './entities/ticket-history.entity';
+import { Ticket } from './entities/ticket.entity';
 
-import { TicketStatus, TicketPriority } from '../common/enums/ticket.enum';
-
-// ─── Palabras clave que elevan la prioridad a CRITICAL ───────────────────────
 const CRITICAL_KEYWORDS = [
-  'caído', 'caido', 'caída', 'producción', 'produccion',
-  'pérdida de datos', 'urgente', 'crítico', 'critico',
-  'no funciona', 'bloqueado', 'bloqueada',
+  'caído',
+  'caido',
+  'caída',
+  'producción',
+  'produccion',
+  'pérdida de datos',
+  'urgente',
+  'crítico',
+  'critico',
+  'no funciona',
+  'bloqueado',
+  'bloqueada',
 ];
 
-// ─── Categorías que tienen prioridad HIGH por defecto ─────────────────────────
 const HIGH_PRIORITY_SLUGS = ['infrastructure', 'security', 'database'];
+
+const ALLOWED_STATUS_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
+  [TicketStatus.OPEN]: [TicketStatus.IN_PROGRESS, TicketStatus.PENDING],
+  [TicketStatus.IN_PROGRESS]: [TicketStatus.PENDING, TicketStatus.RESOLVED],
+  [TicketStatus.PENDING]: [TicketStatus.IN_PROGRESS, TicketStatus.RESOLVED],
+  [TicketStatus.RESOLVED]: [TicketStatus.CLOSED],
+  [TicketStatus.CLOSED]: [],
+};
+
+type CountMetric = { total: number } & Record<string, unknown>;
+type CriticalTicketMetric = {
+  code: string;
+  title: string;
+  status: TicketStatus;
+  created_at: Date;
+  owner_name: string;
+  owner_email: string;
+  hours_open: string;
+};
 
 @Injectable()
 export class TicketsService {
+  private readonly logger = new Logger(TicketsService.name);
+
   constructor(
     @InjectRepository(Ticket)
     private readonly ticketRepo: Repository<Ticket>,
-
     @InjectRepository(TicketHistory)
     private readonly historyRepo: Repository<TicketHistory>,
-
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
-
     @InjectRepository(Category)
     private readonly categoryRepo: Repository<Category>,
-
     private readonly dataSource: DataSource,
   ) {}
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // CREAR TICKET — Transacción ACID completa
-  // ───────────────────────────────────────────────────────────────────────────
   async create(dto: CreateTicketDto): Promise<Ticket> {
-    // ── 1. Idempotencia: evitar duplicados por retries de Power Automate ──
-    if (dto.idempotencyKey) {
-      const existing = await this.ticketRepo.findOne({
-        where: { idempotencyKey: dto.idempotencyKey },
-      });
-      if (existing) {
-        console.log(`ℹ️  Ticket duplicado ignorado (idempotencyKey: ${dto.idempotencyKey})`);
-        return existing;
-      }
-    }
-
-    // ── 2. Validar usuario y categoría ANTES de abrir la transacción ──
-    const user = await this.userRepo.findOne({ where: { id: dto.userId } });
-    if (!user) throw new BadRequestException(`Usuario con id ${dto.userId} no encontrado`);
-
-    const category = await this.categoryRepo.findOne({
-      where: { slug: dto.categorySlug },
-    });
-    if (!category) {
-      throw new BadRequestException(`Categoría con slug "${dto.categorySlug}" no encontrada`);
-    }
-
-    // ── 3. Calcular código y prioridad ──
-    const code     = await this.generateTicketCode();
-    const priority = this.assignPriority(dto.categorySlug, dto.description);
-
-    // ── 4. Abrir transacción ACID ──────────────────────────────────────────
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
+    let ticketId: string | undefined;
 
     try {
-      // 4a. INSERT en tickets
+      if (dto.idempotencyKey) {
+        await this.acquireTransactionLock(
+          queryRunner.manager,
+          `ticket-idempotency:${dto.idempotencyKey}`,
+        );
+        const existing = await queryRunner.manager.findOne(Ticket, {
+          where: { idempotencyKey: dto.idempotencyKey },
+        });
+        if (existing) {
+          await queryRunner.commitTransaction();
+          return existing;
+        }
+      }
+
+      const user = await queryRunner.manager.findOne(User, {
+        where: { id: dto.userId },
+      });
+      const category = await queryRunner.manager.findOne(Category, {
+        where: { slug: dto.categorySlug },
+      });
+
+      if (!user) {
+        throw new BadRequestException(
+          `Usuario con id ${dto.userId} no encontrado`,
+        );
+      }
+      if (!category) {
+        throw new BadRequestException(
+          `Categoría con slug "${dto.categorySlug}" no encontrada`,
+        );
+      }
+
       const ticket = queryRunner.manager.create(Ticket, {
-        code,
-        title:          dto.title,
-        description:    dto.description,
-        status:         TicketStatus.OPEN,
-        priority,
-        imageUrl:       dto.imageUrl,
-        idempotencyKey: dto.idempotencyKey,
+        code: await this.generateTicketCode(queryRunner.manager),
+        title: dto.title,
+        description: dto.description,
+        status: TicketStatus.OPEN,
+        priority: this.assignPriority(dto.categorySlug, dto.description),
+        imageUrl: dto.imageUrl ?? null,
+        idempotencyKey: dto.idempotencyKey ?? null,
         category,
-        createdBy:      user,
+        createdBy: user,
       });
       const savedTicket = await queryRunner.manager.save(ticket);
 
-      // 4b. INSERT en ticket_history  ← si esto falla, el ticket NO se guarda
-      const historyEntry = queryRunner.manager.create(TicketHistory, {
-        ticket:     savedTicket,
-        fromStatus: null,
-        toStatus:   TicketStatus.OPEN,
-        changedBy:  user,
-        note:       'Ticket creado desde Power Apps',
-      });
-      await queryRunner.manager.save(historyEntry);
+      await queryRunner.manager.save(
+        queryRunner.manager.create(TicketHistory, {
+          ticket: savedTicket,
+          fromStatus: null,
+          toStatus: TicketStatus.OPEN,
+          changedBy: user,
+          note: 'Ticket creado desde Power Apps',
+        }),
+      );
 
-      // 4c. COMMIT — todo o nada
       await queryRunner.commitTransaction();
-      console.log(`✅  Ticket creado: ${savedTicket.code} | Prioridad: ${savedTicket.priority}`);
-
-      return this.findOne(savedTicket.id);
-
-    } catch (error) {
-      // ROLLBACK — garantiza consistencia ACID
-      await queryRunner.rollbackTransaction();
-      console.error('❌  Rollback ejecutado:', error.message);
+      ticketId = savedTicket.id;
+      this.logger.log(`Ticket created: ${savedTicket.code}`);
+    } catch (error: unknown) {
+      if (queryRunner.isTransactionActive) {
+        await queryRunner.rollbackTransaction();
+      }
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error(
+        'Ticket transaction rolled back',
+        error instanceof Error ? error.stack : undefined,
+      );
       throw new InternalServerErrorException(
         'Error al crear el ticket. Transacción revertida.',
       );
     } finally {
       await queryRunner.release();
     }
+
+    if (!ticketId) {
+      throw new InternalServerErrorException('No se pudo crear el ticket');
+    }
+    return this.findOne(ticketId);
   }
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // LISTAR con filtros + paginación
-  // ───────────────────────────────────────────────────────────────────────────
   async findAll(filters: FilterTicketsDto): Promise<{
     data: Ticket[];
     meta: { total: number; page: number; limit: number; totalPages: number };
   }> {
     const { status, priority, categorySlug, page = 1, limit = 20 } = filters;
-
-    const qb = this.ticketRepo
+    const query = this.ticketRepo
       .createQueryBuilder('ticket')
-      .leftJoinAndSelect('ticket.category',   'category')
-      .leftJoinAndSelect('ticket.createdBy',  'createdBy')
+      .leftJoinAndSelect('ticket.category', 'category')
+      .leftJoinAndSelect('ticket.createdBy', 'createdBy')
       .leftJoinAndSelect('ticket.assignedTo', 'assignedTo')
       .orderBy('ticket.createdAt', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
 
-    if (status)       qb.andWhere('ticket.status = :status',       { status });
-    if (priority)     qb.andWhere('ticket.priority = :priority',   { priority });
-    if (categorySlug) qb.andWhere('category.slug = :categorySlug', { categorySlug });
+    if (status) query.andWhere('ticket.status = :status', { status });
+    if (priority) query.andWhere('ticket.priority = :priority', { priority });
+    if (categorySlug) {
+      query.andWhere('category.slug = :categorySlug', { categorySlug });
+    }
 
-    const [data, total] = await qb.getManyAndCount();
-
+    const [data, total] = await query.getManyAndCount();
     return {
       data,
       meta: {
@@ -159,84 +190,105 @@ export class TicketsService {
     };
   }
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // OBTENER UN TICKET por ID
-  // ───────────────────────────────────────────────────────────────────────────
   async findOne(id: string): Promise<Ticket> {
     const ticket = await this.ticketRepo.findOne({
       where: { id },
-      relations: ['category', 'createdBy', 'assignedTo', 'history', 'history.changedBy'],
+      relations: [
+        'category',
+        'createdBy',
+        'assignedTo',
+        'history',
+        'history.changedBy',
+      ],
     });
-    if (!ticket) throw new NotFoundException(`Ticket con id ${id} no encontrado`);
+    if (!ticket) {
+      throw new NotFoundException(`Ticket con id ${id} no encontrado`);
+    }
     return ticket;
   }
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // CAMBIAR ESTADO — con registro de historial (también en transacción)
-  // ───────────────────────────────────────────────────────────────────────────
   async updateStatus(id: string, dto: UpdateStatusDto) {
-    const ticket = await this.findOne(id);
-    const technician = await this.userRepo.findOne({ where: { id: dto.changedBy } });
-    if (!technician) {
-      throw new BadRequestException(`Técnico con id ${dto.changedBy} no encontrado`);
-    }
-
-    const previousStatus = ticket.status;
-
-    if (previousStatus === dto.status) {
-      throw new BadRequestException(
-        `El ticket ya se encuentra en estado ${dto.status}`,
-      );
-    }
-
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
 
     try {
-      // Actualizar el estado del ticket
+      await this.acquireTransactionLock(
+        queryRunner.manager,
+        `ticket-status:${id}`,
+      );
+      const ticket = await queryRunner.manager.findOne(Ticket, {
+        where: { id },
+        relations: ['category'],
+      });
+      if (!ticket) {
+        throw new NotFoundException(`Ticket con id ${id} no encontrado`);
+      }
+
+      const technician = await queryRunner.manager.findOne(User, {
+        where: { id: dto.changedBy },
+      });
+      if (!technician) {
+        throw new BadRequestException(
+          `Técnico con id ${dto.changedBy} no encontrado`,
+        );
+      }
+
+      const previousStatus = ticket.status;
+      if (!ALLOWED_STATUS_TRANSITIONS[previousStatus].includes(dto.status)) {
+        throw new BadRequestException(
+          `Transición no permitida: ${previousStatus} -> ${dto.status}`,
+        );
+      }
+
       ticket.status = dto.status;
       if (dto.status === TicketStatus.RESOLVED) {
         ticket.resolvedAt = new Date();
       }
       await queryRunner.manager.save(ticket);
-
-      // Registrar en historial (dispara el polling de n8n)
-      const historyEntry = queryRunner.manager.create(TicketHistory, {
-        ticket,
-        fromStatus: previousStatus,
-        toStatus:   dto.status,
-        changedBy:  technician,
-        note:       dto.note,
-      });
-      await queryRunner.manager.save(historyEntry);
+      await queryRunner.manager.save(
+        queryRunner.manager.create(TicketHistory, {
+          ticket,
+          fromStatus: previousStatus,
+          toStatus: dto.status,
+          changedBy: technician,
+          note: dto.note ?? null,
+        }),
+      );
 
       await queryRunner.commitTransaction();
-
-      // Calcular tiempo de resolución si aplica
-      let resolutionTimeHours: number | null = null;
-      let slaMet: boolean | null = null;
-
-      if (dto.status === TicketStatus.RESOLVED && ticket.resolvedAt) {
-        const diffMs = ticket.resolvedAt.getTime() - ticket.createdAt.getTime();
-        resolutionTimeHours = parseFloat((diffMs / 1000 / 3600).toFixed(2));
-        slaMet = ticket.category
-          ? resolutionTimeHours <= ticket.category.slaHours
-          : null;
-      }
+      const resolutionTimeHours = ticket.resolvedAt
+        ? Number(
+            (
+              (ticket.resolvedAt.getTime() - ticket.createdAt.getTime()) /
+              3_600_000
+            ).toFixed(2),
+          )
+        : null;
 
       return {
-        ticketId:            ticket.id,
-        code:                ticket.code,
+        ticketId: ticket.id,
+        code: ticket.code,
         previousStatus,
-        newStatus:           dto.status,
-        resolvedAt:          ticket.resolvedAt ?? null,
+        newStatus: dto.status,
+        resolvedAt: ticket.resolvedAt,
         resolutionTimeHours,
-        slaMet,
+        slaMet:
+          resolutionTimeHours === null
+            ? null
+            : resolutionTimeHours <= ticket.category.slaHours,
       };
-
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
+    } catch (error: unknown) {
+      if (queryRunner.isTransactionActive) {
+        await queryRunner.rollbackTransaction();
+      }
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error(
+        'Status transaction rolled back',
+        error instanceof Error ? error.stack : undefined,
+      );
       throw new InternalServerErrorException(
         'Error al actualizar el estado. Transacción revertida.',
       );
@@ -245,90 +297,54 @@ export class TicketsService {
     }
   }
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // MÉTRICAS Y KPIs
-  // ───────────────────────────────────────────────────────────────────────────
   async getMetrics() {
-    const em = this.dataSource.manager;
+    const manager = this.dataSource.manager;
+    const byStatus = await this.queryRows<CountMetric>(
+      manager,
+      `SELECT status, COUNT(*)::int AS total
+       FROM tickets GROUP BY status ORDER BY total DESC`,
+    );
+    const avgResolutionByCategory = await this.queryRows<CountMetric>(
+      manager,
+      `SELECT c.name AS category,
+              ROUND(AVG(EXTRACT(EPOCH FROM (t.resolved_at - t.created_at)) / 3600)::numeric, 2) AS avg_resolution_hours,
+              COUNT(t.id)::int AS resolved_tickets
+       FROM tickets t JOIN categories c ON t.category_id = c.id
+       WHERE t.status = 'RESOLVED' AND t.resolved_at IS NOT NULL
+       GROUP BY c.name ORDER BY avg_resolution_hours ASC`,
+    );
+    const byPriority = await this.queryRows<CountMetric>(
+      manager,
+      `SELECT priority, COUNT(*)::int AS total
+       FROM tickets GROUP BY priority
+       ORDER BY CASE priority WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 4 END`,
+    );
+    const slaCompliance = await this.queryRows<CountMetric>(
+      manager,
+      `SELECT c.name AS category,
+              COUNT(t.id)::int AS total_resolved,
+              SUM(CASE WHEN EXTRACT(EPOCH FROM (t.resolved_at - t.created_at)) / 3600 <= c.sla_hours THEN 1 ELSE 0 END)::int AS within_sla,
+              ROUND(100.0 * SUM(CASE WHEN EXTRACT(EPOCH FROM (t.resolved_at - t.created_at)) / 3600 <= c.sla_hours THEN 1 ELSE 0 END) / NULLIF(COUNT(t.id), 0), 2) AS sla_compliance_pct
+       FROM tickets t JOIN categories c ON t.category_id = c.id
+       WHERE t.status = 'RESOLVED' AND t.resolved_at IS NOT NULL
+       GROUP BY c.name, c.sla_hours ORDER BY sla_compliance_pct DESC`,
+    );
+    const criticalOverdue = await this.queryRows<CriticalTicketMetric>(
+      manager,
+      `SELECT t.code, t.title, t.status, t.created_at,
+              u.name AS owner_name, u.email AS owner_email,
+              ROUND(EXTRACT(EPOCH FROM (NOW() - t.created_at)) / 3600, 2) AS hours_open
+       FROM tickets t JOIN users u ON t.created_by = u.id
+       WHERE t.priority = 'CRITICAL'
+         AND t.status NOT IN ('RESOLVED', 'CLOSED')
+         AND t.created_at < NOW() - INTERVAL '4 hours'
+       ORDER BY t.created_at ASC`,
+    );
 
-    // KPI 1 — Volumen total por estado
-    const byStatus = await em.query(`
-      SELECT status, COUNT(*)::int AS total
-      FROM tickets
-      GROUP BY status
-      ORDER BY total DESC
-    `);
-
-    // KPI 2 — Tiempo promedio de resolución por categoría (horas)
-    const avgResolutionByCategory = await em.query(`
-      SELECT
-        c.name AS category,
-        ROUND(
-          AVG(EXTRACT(EPOCH FROM (t.resolved_at - t.created_at)) / 3600)::numeric,
-          2
-        ) AS avg_resolution_hours,
-        COUNT(t.id)::int AS resolved_tickets
-      FROM tickets t
-      JOIN categories c ON t.category_id = c.id
-      WHERE t.status = 'RESOLVED' AND t.resolved_at IS NOT NULL
-      GROUP BY c.name
-      ORDER BY avg_resolution_hours ASC
-    `);
-
-    // KPI 3 — Tickets por prioridad
-    const byPriority = await em.query(`
-      SELECT priority, COUNT(*)::int AS total
-      FROM tickets
-      GROUP BY priority
-      ORDER BY CASE priority
-        WHEN 'CRITICAL' THEN 1
-        WHEN 'HIGH'     THEN 2
-        WHEN 'MEDIUM'   THEN 3
-        WHEN 'LOW'      THEN 4
-      END
-    `);
-
-    // KPI 4 — Cumplimiento de SLA (tickets resueltos dentro del SLA vs fuera)
-    const slaCompliance = await em.query(`
-      SELECT
-        c.name AS category,
-        COUNT(t.id)::int AS total_resolved,
-        SUM(CASE
-          WHEN EXTRACT(EPOCH FROM (t.resolved_at - t.created_at)) / 3600 <= c.sla_hours
-          THEN 1 ELSE 0
-        END)::int AS within_sla,
-        ROUND(
-          100.0 * SUM(CASE
-            WHEN EXTRACT(EPOCH FROM (t.resolved_at - t.created_at)) / 3600 <= c.sla_hours
-            THEN 1 ELSE 0
-          END) / NULLIF(COUNT(t.id), 0), 2
-        ) AS sla_compliance_pct
-      FROM tickets t
-      JOIN categories c ON t.category_id = c.id
-      WHERE t.status = 'RESOLVED' AND t.resolved_at IS NOT NULL
-      GROUP BY c.name, c.sla_hours
-      ORDER BY sla_compliance_pct DESC
-    `);
-
-    // KPI 5 — Tickets críticos abiertos hace más de 4 horas (alertas)
-    const criticalOverdue = await em.query(`
-      SELECT
-        t.code, t.title, t.status, t.created_at,
-        u.name AS owner_name, u.email AS owner_email,
-        ROUND(
-          EXTRACT(EPOCH FROM (NOW() - t.created_at)) / 3600, 2
-        ) AS hours_open
-      FROM tickets t
-      JOIN users u ON t.created_by = u.id
-      WHERE t.priority = 'CRITICAL'
-        AND t.status NOT IN ('RESOLVED', 'CLOSED')
-        AND t.created_at < NOW() - INTERVAL '4 hours'
-      ORDER BY t.created_at ASC
-    `);
-
-    // Conteos generales
-    const totalTickets  = await this.ticketRepo.count();
-    const openTickets   = await this.ticketRepo.count({ where: { status: TicketStatus.OPEN } });
+    const [totalTickets, openTickets] = await Promise.all([
+      this.ticketRepo.count(),
+      this.ticketRepo.count({ where: { status: TicketStatus.OPEN } }),
+    ]);
 
     return {
       summary: {
@@ -336,53 +352,71 @@ export class TicketsService {
         openTickets,
         criticalOverdueCount: criticalOverdue.length,
       },
-      kpi1_byStatus:               byStatus,
+      kpi1_byStatus: byStatus,
       kpi2_avgResolutionByCategory: avgResolutionByCategory,
-      kpi3_byPriority:             byPriority,
-      kpi4_slaCompliance:          slaCompliance,
-      kpi5_criticalOverdue:        criticalOverdue,
+      kpi3_byPriority: byPriority,
+      kpi4_slaCompliance: slaCompliance,
+      kpi5_criticalOverdue: criticalOverdue,
     };
   }
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // ENDPOINT PARA n8n — registros de historial recientes para polling
-  // ───────────────────────────────────────────────────────────────────────────
   async getRecentHistory(sinceMinutes = 2) {
+    const safeMinutes = Math.min(Math.max(sinceMinutes, 1), 1_440);
     return this.historyRepo
-      .createQueryBuilder('h')
-      .leftJoinAndSelect('h.ticket',    'ticket')
-      .leftJoinAndSelect('h.changedBy', 'changedBy')
+      .createQueryBuilder('history')
+      .leftJoinAndSelect('history.ticket', 'ticket')
+      .leftJoinAndSelect('history.changedBy', 'changedBy')
       .leftJoinAndSelect('ticket.createdBy', 'createdBy')
-      .where(`h.created_at > NOW() - INTERVAL '${sinceMinutes} minutes'`)
-      .orderBy('h.created_at', 'DESC')
+      .where(`history.created_at > NOW() - (:minutes * INTERVAL '1 minute')`, {
+        minutes: safeMinutes,
+      })
+      .orderBy('history.created_at', 'DESC')
       .getMany();
   }
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // HELPERS PRIVADOS
-  // ───────────────────────────────────────────────────────────────────────────
-
-  /** Genera código correlativo: TKT-2026-00001 */
-  private async generateTicketCode(): Promise<string> {
+  private async generateTicketCode(manager: EntityManager): Promise<string> {
     const year = new Date().getFullYear();
-    const last = await this.ticketRepo.findOne({
+    await this.acquireTransactionLock(manager, `ticket-code:${year}`);
+    const last = await manager.findOne(Ticket, {
       where: { code: Like(`TKT-${year}-%`) },
-      order: { createdAt: 'DESC' },
+      order: { code: 'DESC' },
     });
-
-    const lastNumber = last ? parseInt(last.code.split('-')[2], 10) : 0;
-    const next       = String(lastNumber + 1).padStart(5, '0');
-    return `TKT-${year}-${next}`;
+    const lastNumber = last ? Number(last.code.split('-')[2]) : 0;
+    return `TKT-${year}-${String(lastNumber + 1).padStart(5, '0')}`;
   }
 
-  /** Calcula la prioridad basado en categoría y palabras clave en la descripción */
-  private assignPriority(categorySlug: string, description: string): TicketPriority {
-    const descLower = description.toLowerCase();
-    const isCritical = CRITICAL_KEYWORDS.some((kw) => descLower.includes(kw));
-
-    if (isCritical)                            return TicketPriority.CRITICAL;
-    if (HIGH_PRIORITY_SLUGS.includes(categorySlug)) return TicketPriority.HIGH;
-    if (categorySlug === 'software')           return TicketPriority.MEDIUM;
+  private assignPriority(
+    categorySlug: string,
+    description: string,
+  ): TicketPriority {
+    const normalizedDescription = description.toLocaleLowerCase('es');
+    if (
+      CRITICAL_KEYWORDS.some((keyword) =>
+        normalizedDescription.includes(keyword),
+      )
+    ) {
+      return TicketPriority.CRITICAL;
+    }
+    if (HIGH_PRIORITY_SLUGS.includes(categorySlug)) {
+      return TicketPriority.HIGH;
+    }
+    if (categorySlug === 'software') {
+      return TicketPriority.MEDIUM;
+    }
     return TicketPriority.LOW;
+  }
+
+  private async acquireTransactionLock(
+    manager: EntityManager,
+    key: string,
+  ): Promise<void> {
+    await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key]);
+  }
+
+  private async queryRows<T>(
+    manager: EntityManager,
+    sql: string,
+  ): Promise<T[]> {
+    return (await manager.query(sql)) as unknown as T[];
   }
 }

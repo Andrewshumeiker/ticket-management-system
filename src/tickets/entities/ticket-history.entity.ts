@@ -8,11 +8,11 @@ import {
   Index,
 } from 'typeorm';
 import { Ticket } from './ticket.entity';
-import { User }   from '../../users/entities/user.entity';
+import { User } from '../../users/entities/user.entity';
 import { TicketStatus } from '../../common/enums/ticket.enum';
 
 @Entity('ticket_history')
-@Index(['createdAt'])   // n8n hace polling sobre esta columna
+@Index(['createdAt']) // n8n hace polling sobre esta columna
 export class TicketHistory {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -35,7 +35,7 @@ export class TicketHistory {
 
   /** Nota opcional del técnico */
   @Column({ type: 'text', nullable: true })
-  note: string;
+  note: string | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
