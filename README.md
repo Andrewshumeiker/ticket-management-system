@@ -1,247 +1,142 @@
-# 🎫 Sistema de Gestión de Tickets — Enterprise Ticket Management System
+# Ticket Management System
 
-> Backend REST API + Automatización empresarial para gestión de incidentes técnicos.
->
-> **Stack**: NestJS · TypeORM · PostgreSQL · Power Apps · Power Automate · n8n · Cloudinary
+API REST para registrar, priorizar y dar seguimiento a incidentes. El proyecto demuestra diseño transaccional con NestJS, TypeORM y PostgreSQL: una operación de ticket y su historial se confirman juntas o se revierten juntas.
 
----
+![Diagrama de arquitectura](./docs/images/architecture_diagram.png)
 
-## 📐 Arquitectura del Sistema
+## Qué resuelve
 
-![Arquitectura](./docs/images/architecture_diagram.png)
+- Creación idempotente de tickets para tolerar reintentos de clientes y automatizaciones.
+- Códigos correlativos seguros ante concurrencia (`TKT-2026-00001`).
+- Priorización automática basada en el contenido del incidente.
+- Flujo de estados validado y registro auditable de cada cambio.
+- Consultas paginadas, historial reciente y métricas operativas.
+- Contratos de entrada validados y documentación OpenAPI.
 
-```
-Power Apps (Móvil) → Power Automate (Orquestador) → NestJS (Backend) → PostgreSQL (DB)
-                                                                      ↳ n8n (Notificaciones)
-```
+Las integraciones con Power Apps, Power Automate y n8n son consumidores posibles de la API; no son requisitos para ejecutar el backend.
 
-### Separación de Responsabilidades
+## Decisiones técnicas destacadas
 
-| Componente | Responsabilidad | ¿Lógica de negocio? |
-|---|---|---|
-| **Power Apps** | Formulario móvil, captura de datos y foto | ❌ Solo UI |
-| **Power Automate** | Orquestar upload de imagen y llamar al backend | ❌ Solo mensajero |
-| **NestJS** | Validación, prioridad, transacciones ACID, API REST | ✅ **Toda la lógica** |
-| **PostgreSQL** | Persistencia relacional con integridad referencial | ❌ Solo storage |
-| **n8n** | Polling de cambios de estado → notificaciones | ❌ Solo reactor |
+- Las claves de idempotencia y los consecutivos usan bloqueos transaccionales de PostgreSQL para evitar carreras.
+- Los cambios de estado se serializan por ticket y solo permiten estas rutas:
 
----
-
-## ⚡ Características Principales
-
-- ✅ **Transacciones ACID** — Si falla el historial, hace rollback del ticket
-- ✅ **Prioridad automática** — Detecta palabras clave ("caído", "urgente") → CRITICAL
-- ✅ **Código correlativo** — Genera `TKT-2026-00001`, `TKT-2026-00002`...
-- ✅ **Idempotencia** — Previene duplicados por retries de Power Automate
-- ✅ **5 KPIs nativos** — MTTR, SLA compliance, volumen por categoría
-- ✅ **Swagger UI** — Documentación interactiva en `/docs`
-- ✅ **Seed automático** — Categorías se insertan al iniciar
-- ✅ **API Key Auth** — Middleware de autenticación simple para MVP
-
----
-
-## 🗂️ Estructura del Proyecto
-
-```
-src/
-├── main.ts                             # Entry: Swagger, CORS, ValidationPipe
-├── app.module.ts                       # Módulo raíz con TypeORM async
-├── common/
-│   ├── enums/ticket.enum.ts            # TicketStatus, TicketPriority
-│   └── middleware/api-key.middleware.ts # Autenticación MVP
-├── users/
-│   ├── entities/user.entity.ts         # UUID, email, phone
-│   ├── dto/create-user.dto.ts          # Validaciones class-validator
-│   ├── users.service.ts
-│   ├── users.controller.ts
-│   └── users.module.ts
-├── categories/
-│   ├── entities/category.entity.ts     # slug, sla_hours
-│   ├── categories.service.ts           # Seed automático en OnModuleInit
-│   ├── categories.controller.ts
-│   └── categories.module.ts
-├── tickets/
-│   ├── entities/
-│   │   ├── ticket.entity.ts            # FK → User, Category, idempotency_key
-│   │   └── ticket-history.entity.ts    # CASCADE DELETE, índice para n8n
-│   ├── dto/
-│   │   ├── create-ticket.dto.ts        # Validación completa con Swagger docs
-│   │   ├── update-status.dto.ts        # Cambio de estado + nota
-│   │   └── filter-tickets.dto.ts       # Paginación + filtros
-│   ├── tickets.service.ts              # 🔥 CORE: ACID, idempotencia, KPIs
-│   ├── tickets.controller.ts           # 6 endpoints documentados
-│   └── tickets.module.ts               # API Key middleware
-└── seed/seed.ts                        # Datos de prueba
+```text
+OPEN -> IN_PROGRESS | PENDING
+IN_PROGRESS -> PENDING | RESOLVED
+PENDING -> IN_PROGRESS | RESOLVED
+RESOLVED -> CLOSED
 ```
 
----
+- `API_KEY` es obligatoria, sin secretos de respaldo dentro del código.
+- Usuarios, categorías y tickets están protegidos mediante `x-api-key`.
+- CORS usa una lista exacta definida por `CORS_ORIGINS`.
+- El esquema productivo se administra mediante migraciones; `DB_SYNC` solo puede habilitarse fuera de producción.
 
-## 🚀 Instalación y Ejecución
+## Stack
 
-### Requisitos
-- **Node.js** ≥ 18
-- **PostgreSQL** 14+
-- **npm** ≥ 9
+- Node.js 20+ y TypeScript
+- NestJS 11
+- TypeORM 0.3
+- PostgreSQL 16+
+- Jest y Supertest
+- Swagger/OpenAPI
 
-### Pasos
+## Inicio rápido
+
+Requisitos: Node.js 20 o superior, npm y PostgreSQL. También se incluye Docker Compose para levantar PostgreSQL y Adminer.
 
 ```bash
-# 1. Clonar el repositorio
-git clone https://github.com/TU_USUARIO/ticket-management-system.git
+git clone https://github.com/Andrewshumeiker/ticket-management-system.git
 cd ticket-management-system
-
-# 2. Instalar dependencias
-npm install
-
-# 3. Configurar PostgreSQL
-# Crear la base de datos:
-psql -U postgres -c "CREATE DATABASE tickets_db;"
-
-# 4. Configurar variables de entorno
-# Editar .env con tus credenciales de PostgreSQL
-
-# 5. Iniciar en modo desarrollo
+npm ci
+cp .env.example .env
+docker compose up -d postgres
+npm run migration:run
 npm run start:dev
-
-# 6. (Opcional) Insertar datos de prueba
-npx ts-node src/seed/seed.ts
 ```
 
-### Variables de Entorno (.env)
+Antes de iniciar, cambia `API_KEY` y revisa las credenciales de `.env`. Para generar datos demostrativos en una base vacía:
 
-```env
-APP_PORT=3000
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=postgres
-DB_PASS=postgres
-DB_NAME=tickets_db
-API_KEY=power-automate-secret-key-2026
+```bash
+npm run seed
 ```
 
----
+Swagger queda disponible en `http://localhost:3000/docs` y la API en `http://localhost:3000/api/v1`.
 
-## 📡 API Endpoints
+## Configuración
 
-| Método | Ruta | Auth | Descripción |
-|---|---|---|---|
-| `POST` | `/api/v1/tickets` | 🔒 API Key | Crear ticket (Power Automate) |
-| `GET` | `/api/v1/tickets` | 🔒 API Key | Listar con filtros + paginación |
-| `GET` | `/api/v1/tickets/:id` | 🔒 API Key | Ticket detallado con historial |
-| `PATCH` | `/api/v1/tickets/:id/status` | 🔒 API Key | Cambiar estado (ACID) |
-| `GET` | `/api/v1/tickets/metrics` | 🔒 API Key | 5 KPIs operativos |
-| `GET` | `/api/v1/tickets/history/recent` | 🔒 API Key | Polling para n8n |
-| `POST` | `/api/v1/users` | 🔓 | Crear usuario |
-| `GET` | `/api/v1/users` | 🔓 | Listar usuarios |
-| `GET` | `/api/v1/users/:id` | 🔓 | Usuario por ID |
-| `GET` | `/api/v1/categories` | 🔓 | Listar categorías |
+| Variable | Requerida | Propósito |
+|---|---:|---|
+| `DB_HOST` | Sí | Host de PostgreSQL |
+| `DB_PORT` | No | Puerto; por defecto `5432` |
+| `DB_USER` | Sí | Usuario de PostgreSQL |
+| `DB_PASS` | Sí | Contraseña de PostgreSQL |
+| `DB_NAME` | Sí | Base de datos |
+| `API_KEY` | Sí | Secreto de al menos 24 caracteres |
+| `CORS_ORIGINS` | No | Orígenes exactos separados por comas |
+| `DB_SYNC` | No | Sincronización local; nunca se activa en producción |
+| `DB_LOGGING` | No | Registra consultas de TypeORM |
+| `APP_PORT` | No | Puerto HTTP; por defecto `3000` |
 
-### Swagger UI
+## API
 
-![Swagger](./docs/images/swagger_ui.png)
+Todas las rutas requieren el encabezado `x-api-key`.
 
-Disponible en: `http://localhost:3000/docs`
+| Método | Ruta | Descripción |
+|---|---|---|
+| `POST` | `/api/v1/tickets` | Crea un ticket |
+| `GET` | `/api/v1/tickets` | Lista tickets con filtros y paginación |
+| `GET` | `/api/v1/tickets/:id` | Obtiene ticket e historial |
+| `PATCH` | `/api/v1/tickets/:id/status` | Cambia el estado de forma transaccional |
+| `GET` | `/api/v1/tickets/metrics` | Devuelve indicadores operativos |
+| `GET` | `/api/v1/tickets/history/recent` | Devuelve cambios recientes |
+| `POST` | `/api/v1/users` | Crea un usuario |
+| `GET` | `/api/v1/users` | Lista usuarios |
+| `GET` | `/api/v1/categories` | Lista categorías |
 
----
+Ejemplo:
 
-## 🗄️ Modelo de Datos
-
-```
-┌──────────┐        ┌──────────────┐        ┌───────────────┐
-│  users   │───────▶│   tickets    │◀───────│  categories   │
-│          │        │              │        │               │
-│  id (PK) │        │  id (PK)     │        │  id (PK)      │
-│  name    │        │  code (UQ)   │        │  name         │
-│  email   │        │  title       │        │  slug (UQ)    │
-│  phone   │        │  description │        │  sla_hours    │
-│  dept    │        │  status      │        └───────────────┘
-└──────────┘        │  priority    │
-      │             │  image_url   │
-      │             │  created_by  │───FK──▶ users
-      │             │  assigned_to │───FK──▶ users
-      │             │  category_id │───FK──▶ categories
-      │             └──────┬───────┘
-      │                    │ 1:N (CASCADE)
-      │             ┌──────▼───────────┐
-      └────────────▶│ ticket_history   │
-                    │                  │
-                    │  id (PK)         │
-                    │  ticket_id (FK)  │
-                    │  from_status     │
-                    │  to_status       │
-                    │  changed_by (FK) │
-                    │  note            │
-                    └──────────────────┘
+```bash
+curl -X POST http://localhost:3000/api/v1/tickets \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $API_KEY" \
+  -d '{
+    "title": "Servidor de pagos no responde",
+    "description": "El servicio está caído y bloquea transacciones",
+    "categorySlug": "infrastructure",
+    "userId": "00000000-0000-0000-0000-000000000000",
+    "idempotencyKey": "incident-2026-001"
+  }'
 ```
 
----
+## Calidad y verificación
 
-## 📱 Power Apps — Formulario Móvil
+```bash
+npm run verify
+```
 
-![Power Apps Mockup](./docs/images/power_apps_mockup.png)
+El comando ejecuta lint, 8 pruebas unitarias, 3 pruebas HTTP de integración y compilación. GitHub Actions repite la misma verificación en cada push y pull request.
 
-> Power Apps captura los datos del incidente y dispara el flujo de Power Automate.
-> No ejecuta lógica de negocio — eso lo hace NestJS.
+La funcionalidad principal también fue comprobada contra PostgreSQL real: creación idempotente, prioridad crítica, rechazo de una transición inválida, cambio válido y consulta de métricas.
 
----
+## Estructura
 
-## ⚡ Power Automate — Flujo Orquestador
+```text
+src/
+  common/       enums y autenticación por API key
+  config/       validación del entorno
+  database/     DataSource y migraciones
+  users/        usuarios solicitantes y técnicos
+  categories/   categorías y SLA
+  tickets/      reglas, persistencia, historial y métricas
+  seed/         datos demostrativos opcionales
+test/           pruebas HTTP de integración
+```
 
-![Power Automate Flow](./docs/images/power_automate_flow.png)
+## Seguridad y alcance
 
-**Flujo**: Power Apps → Cloudinary (upload imagen) → NestJS (POST ticket) → Respuesta al usuario.
+La API key es una medida apropiada para una integración de servicio a servicio pequeña. Para un producto multiusuario se debería incorporar identidad por usuario, roles, rotación de secretos, rate limiting y observabilidad antes de exponerlo públicamente.
 
----
+## Licencia
 
-## 🔄 n8n — Notificaciones Automáticas
-
-![n8n Workflow](./docs/images/n8n_workflow.png)
-
-- **Schedule Trigger**: cada 60 segundos
-- **HTTP GET**: `/api/v1/tickets/history/recent?minutes=2`
-- **Acción**: Si `toStatus = RESOLVED` → WhatsApp / Slack / Email
-
----
-
-## 📊 KPIs y Reportería
-
-El endpoint `GET /api/v1/tickets/metrics` retorna estos 5 KPIs:
-
-1. **Volumen por estado** — Cuántos tickets hay en cada estado
-2. **MTTR por categoría** — Tiempo promedio de resolución en horas
-3. **Distribución por prioridad** — LOW, MEDIUM, HIGH, CRITICAL
-4. **Cumplimiento de SLA** — % de tickets resueltos dentro del SLA
-5. **Tickets críticos vencidos** — Tickets CRITICAL abiertos > 4 horas
-
----
-
-## 🛡️ Manejo de Riesgos
-
-| Riesgo | Mitigación |
-|---|---|
-| Duplicados por retry de Power Automate | `idempotencyKey` con índice UNIQUE |
-| Fallo parcial en DB | Transacciones ACID (rollback automático) |
-| n8n pierde estado de polling | Polling por `created_at` con ventana de tiempo |
-| Cloudinary down | `imageUrl` es opcional, ticket se crea sin imagen |
-| Timeout en Power Automate (120s) | Backend responde en <200ms |
-
----
-
-## 🧰 Tecnologías
-
-- **Runtime**: Node.js 24, TypeScript
-- **Framework**: NestJS 11
-- **ORM**: TypeORM (PostgreSQL driver `pg`)
-- **Validación**: class-validator + class-transformer
-- **Documentación**: Swagger/OpenAPI 3.0
-- **Base de datos**: PostgreSQL 18
-- **Automatización**: n8n (self-hosted)
-- **Interfaz**: Power Apps (Canvas App)
-- **Orquestación**: Power Automate (Cloud Flow)
-- **Storage**: Cloudinary / S3
-
----
-
-## 📝 Licencia
-
-MIT
+Este repositorio se distribuye como código de portafolio sin una licencia de uso abierta (`UNLICENSED`).

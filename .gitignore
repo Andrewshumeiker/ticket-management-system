@@ -20,3 +20,6 @@ npm-debug.log*
 
 # Coverage
 coverage/
+
+# Local runtime artifacts
+tmp/
